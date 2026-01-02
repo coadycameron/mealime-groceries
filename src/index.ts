@@ -1,25 +1,40 @@
-import { serve } from "./deps.ts";
 import { z } from "./deps.ts";
 import MealimeAPI, { CsrfError } from "./mealime-api.ts";
 
-const mealime = new MealimeAPI(
-  Deno.env.get("MEALIME_EMAIL"),
-  Deno.env.get("MEALIME_PASSWORD"),
-);
+// ---- helpers
+const env = (key: string): string => {
+  const v = Deno.env.get(key);
+  return v ?? "";
+};
+
+const MEALIME_EMAIL = env("MEALIME_EMAIL");
+const MEALIME_PASSWORD = env("MEALIME_PASSWORD");
+const TOKEN = env("TOKEN");
+
+// Keep the process booting even if env vars are missing, but make it obvious in logs.
+if (!MEALIME_EMAIL || !MEALIME_PASSWORD) {
+  console.warn("WARN: MEALIME_EMAIL / MEALIME_PASSWORD not set (Preview warmup may still pass, /add will fail)");
+}
+if (!TOKEN) {
+  console.warn("WARN: TOKEN not set (Preview warmup may still pass, /add and /reset will be unauthorized)");
+}
+
+const mealime = new MealimeAPI(MEALIME_EMAIL, MEALIME_PASSWORD);
 
 const handlePostItem = async (request: Request): Promise<Response> => {
   try {
     await mealime.login();
-  } catch (_e) {
+  } catch (e) {
+    console.error("Login failed", e);
     return new Response("Login failed", { status: 500 });
   }
 
   let query = "";
 
   try {
-    const itemResult = z.object({
-      item: z.string().min(1),
-    }).safeParse(await request.json());
+    const itemResult = z.object({ item: z.string().min(1) }).safeParse(
+      await request.json(),
+    );
 
     if (!itemResult.success) {
       return new Response(itemResult.error.toString(), { status: 400 });
@@ -50,33 +65,33 @@ const handler = async (request: Request): Promise<Response> => {
   const url = new URL(request.url);
   const path = url.pathname;
 
-  // Health check for platform warm-up (no auth required)
-  // Support GET + HEAD because some warmups use HEAD.
+  // ---- Warmup/health: no auth required
+  // Be generous: warmup probes vary (GET/HEAD, /, /health, /healthz).
   if (
     (request.method === "GET" || request.method === "HEAD") &&
-    (path === "/" || path === "/health")
+    (path === "/" || path === "/health" || path === "/healthz")
   ) {
     return new Response("ok", { status: 200 });
   }
 
-  const expectedToken = Deno.env.get("TOKEN");
-  if (!expectedToken) {
-    console.error("TOKEN env var is missing");
-    return new Response("Server misconfigured", { status: 500 });
-  }
-
+  // ---- Auth
   const authHeader =
     request.headers.get("authorization") ?? request.headers.get("Authorization");
 
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return new Response("Not Authorized", { status: 401 });
+  if (!TOKEN) {
+    return new Response("Server misconfigured", { status: 500 });
   }
+
+  if (!authHeader) return new Response("Not Authorized", { status: 401 });
+
+  // case-insensitive "Bearer "
+  const lower = authHeader.toLowerCase();
+  if (!lower.startsWith("bearer ")) return new Response("Not Authorized", { status: 401 });
 
   const providedToken = authHeader.slice("Bearer ".length).trim();
-  if (providedToken !== expectedToken) {
-    return new Response("Not Authorized", { status: 401 });
-  }
+  if (providedToken !== TOKEN) return new Response("Not Authorized", { status: 401 });
 
+  // ---- Routes
   if (request.method === "POST" && path === "/add") {
     return await handlePostItem(request);
   }
@@ -94,31 +109,8 @@ const handler = async (request: Request): Promise<Response> => {
   return new Response("Not Found", { status: 404 });
 };
 
-// Prefer PORT if provided by the platform; default 8000 for local/dev.
+// IMPORTANT: don’t force hostname (:: / 0.0.0.0). Let the platform bind correctly.
+// Use PORT if provided; otherwise default to 8000.
 const port = Number.parseInt(Deno.env.get("PORT") ?? "8000", 10);
-
-// IMPORTANT:
-// Use "::" to bind IPv6-any (usually dual-stack). This fixes platforms probing localhost via ::1.
-const hostnameCandidates = [
-  Deno.env.get("HOSTNAME"),
-  "::",
-  "0.0.0.0",
-].filter((v): v is string => Boolean(v));
-
-let lastErr: unknown = null;
-
-for (const hostname of hostnameCandidates) {
-  try {
-    console.log(`HTTP webserver starting on http://${hostname}:${port}/`);
-    await serve(handler, { hostname, port });
-    // serve() never returns; if it does, break.
-    break;
-  } catch (e) {
-    lastErr = e;
-    console.error(`Failed to bind on ${hostname}:${port}`, e);
-  }
-}
-
-if (lastErr) {
-  throw lastErr;
-}
+console.log(`Starting server (port ${port})`);
+Deno.serve({ port }, handler);
