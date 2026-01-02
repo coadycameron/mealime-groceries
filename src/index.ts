@@ -30,7 +30,6 @@ const handlePostItem = async (request: Request): Promise<Response> => {
     return new Response(addResult.result, { status: 200 });
   } catch (error) {
     if (error instanceof CsrfError || error instanceof Deno.errors.PermissionDenied) {
-      // retry once
       try {
         console.log("Error while adding item, trying reset");
         await mealime.reset();
@@ -52,7 +51,11 @@ const handler = async (request: Request): Promise<Response> => {
   const path = url.pathname;
 
   // Health check for platform warm-up (no auth required)
-  if (request.method === "GET" && (path === "/" || path === "/health")) {
+  // Support GET + HEAD because some warmups use HEAD.
+  if (
+    (request.method === "GET" || request.method === "HEAD") &&
+    (path === "/" || path === "/health")
+  ) {
     return new Response("ok", { status: 200 });
   }
 
@@ -83,7 +86,7 @@ const handler = async (request: Request): Promise<Response> => {
       await mealime.reset();
       return new Response("OK", { status: 200 });
     } catch (error) {
-      console.error("Error while resetting ", error);
+      console.error("Error while resetting", error);
       return new Response("NOK", { status: 500 });
     }
   }
@@ -91,10 +94,31 @@ const handler = async (request: Request): Promise<Response> => {
   return new Response("Not Found", { status: 404 });
 };
 
-// IMPORTANT: bind to 0.0.0.0 so the platform can reach the process.
-// Use platform PORT if provided; default to 8000 (common default) instead of 3000.
+// Prefer PORT if provided by the platform; default 8000 for local/dev.
 const port = Number.parseInt(Deno.env.get("PORT") ?? "8000", 10);
-const hostname = Deno.env.get("HOSTNAME") ?? "0.0.0.0";
 
-console.log(`HTTP webserver running. Listening on http://${hostname}:${port}/`);
-await serve(handler, { hostname, port });
+// IMPORTANT:
+// Use "::" to bind IPv6-any (usually dual-stack). This fixes platforms probing localhost via ::1.
+const hostnameCandidates = [
+  Deno.env.get("HOSTNAME"),
+  "::",
+  "0.0.0.0",
+].filter((v): v is string => Boolean(v));
+
+let lastErr: unknown = null;
+
+for (const hostname of hostnameCandidates) {
+  try {
+    console.log(`HTTP webserver starting on http://${hostname}:${port}/`);
+    await serve(handler, { hostname, port });
+    // serve() never returns; if it does, break.
+    break;
+  } catch (e) {
+    lastErr = e;
+    console.error(`Failed to bind on ${hostname}:${port}`, e);
+  }
+}
+
+if (lastErr) {
+  throw lastErr;
+}
