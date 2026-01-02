@@ -52,20 +52,33 @@ const handlePostItem = async (request: Request): Promise<Response> => {
 };
 
 const handler = async (request: Request): Promise<Response> => {
-  const path = new URL(request.url).pathname;
+  const url = new URL(request.url);
+  const path = url.pathname;
 
-  const authHeader = request.headers.get("authorization");
-
-  // Authorize
-  if (authHeader == null) {
-    console.log("Request does not include auth header");
-    return new Response("Not Authorized", { status: 403 });
+  // Health check for platform warm-up (no auth required)
+  if (request.method === "GET" && (path === "/" || path === "/health")) {
+    return new Response("ok", { status: 200 });
   }
 
-  const match = /Bearer ([a-zA-Z0-9]+)/.exec(authHeader);
-  if (match && match[1] !== Deno.env.get("TOKEN")) {
-    console.log("Request does not include the right auth header");
-    return new Response("Not Authorized", { status: 403 });
+  const expectedToken = Deno.env.get("TOKEN");
+  if (!expectedToken) {
+    console.error("TOKEN env var is missing");
+    return new Response("Server misconfigured", { status: 500 });
+  }
+
+  const authHeader = request.headers.get("authorization") ??
+    request.headers.get("Authorization");
+
+  // Authorize
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    console.log("Request does not include a valid Bearer auth header");
+    return new Response("Not Authorized", { status: 401 });
+  }
+
+  const providedToken = authHeader.slice("Bearer ".length).trim();
+  if (providedToken !== expectedToken) {
+    console.log("Request does not include the right auth token");
+    return new Response("Not Authorized", { status: 401 });
   }
 
   // Route to endpoint
@@ -85,6 +98,6 @@ const handler = async (request: Request): Promise<Response> => {
   return new Response("Not Found", { status: 404 });
 };
 
-const port = 3000;
-console.log(`HTTP webserver running. Access it at: http://localhost:${port}/`);
+const port = Number.parseInt(Deno.env.get("PORT") ?? "3000", 10);
+console.log(`HTTP webserver running. Listening on port ${port}`);
 await serve(handler, { port });
