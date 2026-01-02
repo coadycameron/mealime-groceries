@@ -10,35 +10,30 @@ const mealime = new MealimeAPI(
 const handlePostItem = async (request: Request): Promise<Response> => {
   try {
     await mealime.login();
-  } catch (_) {
+  } catch (_e) {
     return new Response("Login failed", { status: 500 });
   }
 
   let query = "";
 
   try {
-    // Validate input
     const itemResult = z.object({
       item: z.string().min(1),
     }).safeParse(await request.json());
-    if (itemResult.success) {
-      query = itemResult.data.item;
-      const addResult = await mealime.addQuery(query);
-      return new Response(addResult.result, { status: 200 });
-    } else {
+
+    if (!itemResult.success) {
       return new Response(itemResult.error.toString(), { status: 400 });
     }
+
+    query = itemResult.data.item;
+    const addResult = await mealime.addQuery(query);
+    return new Response(addResult.result, { status: 200 });
   } catch (error) {
-    if (
-      error instanceof CsrfError ||
-      error instanceof Deno.errors.PermissionDenied
-    ) {
+    if (error instanceof CsrfError || error instanceof Deno.errors.PermissionDenied) {
       // retry once
       try {
         console.log("Error while adding item, trying reset");
         await mealime.reset();
-        // We know that the validation did not return an error,
-        // so item is valid
         const addResult = await mealime.addQuery(query);
         return new Response(addResult.result, { status: 200 });
       } catch (resetError) {
@@ -46,7 +41,8 @@ const handlePostItem = async (request: Request): Promise<Response> => {
         return new Response("Reset didn't work", { status: 500 });
       }
     }
-    console.error("Unexpected error");
+
+    console.error("Unexpected error", error);
     return new Response("Unexpected error", { status: 500 });
   }
 };
@@ -66,22 +62,18 @@ const handler = async (request: Request): Promise<Response> => {
     return new Response("Server misconfigured", { status: 500 });
   }
 
-  const authHeader = request.headers.get("authorization") ??
-    request.headers.get("Authorization");
+  const authHeader =
+    request.headers.get("authorization") ?? request.headers.get("Authorization");
 
-  // Authorize
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    console.log("Request does not include a valid Bearer auth header");
     return new Response("Not Authorized", { status: 401 });
   }
 
   const providedToken = authHeader.slice("Bearer ".length).trim();
   if (providedToken !== expectedToken) {
-    console.log("Request does not include the right auth token");
     return new Response("Not Authorized", { status: 401 });
   }
 
-  // Route to endpoint
   if (request.method === "POST" && path === "/add") {
     return await handlePostItem(request);
   }
@@ -95,9 +87,14 @@ const handler = async (request: Request): Promise<Response> => {
       return new Response("NOK", { status: 500 });
     }
   }
+
   return new Response("Not Found", { status: 404 });
 };
 
-const port = Number.parseInt(Deno.env.get("PORT") ?? "3000", 10);
-console.log(`HTTP webserver running. Listening on port ${port}`);
-await serve(handler, { port });
+// IMPORTANT: bind to 0.0.0.0 so the platform can reach the process.
+// Use platform PORT if provided; default to 8000 (common default) instead of 3000.
+const port = Number.parseInt(Deno.env.get("PORT") ?? "8000", 10);
+const hostname = Deno.env.get("HOSTNAME") ?? "0.0.0.0";
+
+console.log(`HTTP webserver running. Listening on http://${hostname}:${port}/`);
+await serve(handler, { hostname, port });
